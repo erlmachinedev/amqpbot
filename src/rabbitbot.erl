@@ -19,7 +19,7 @@
 -export([callback_mode/0]).
 
 %% Bot
--export([execute/3]).
+-export([compute/3]).
 
 %% Commands
 -export([connect/0, disconnect/0]).
@@ -72,10 +72,12 @@ boot() ->
             Base64 = erlmachine:base64url(MD5),
             SN = <<"SN-", Base64/binary>>,
 
-            start(SN, []),
-            SN
+            {ok, _} = start(SN, []),
 
-      end || Serial <- range(5000)
+            Res = SN,
+            Res
+
+      end || Serial <- range(4000)
     ].
 
 %%% Bot API
@@ -120,20 +122,42 @@ stop(SN) ->
                 commands::[command()],
                 ram::ram(),
 
+                wire::term(),
+
                 timestamp::timestamp()
               }).
 
 -type data() :: #data{}.
 
 init(Data) ->
-    Actions = [action(Command)|| Command <- commands(Data)],
+    Actions = [ action(Command)|| Command <- commands(Data)
 
-    Res = erlmachine:success(execute, Data, Actions),
-    Res.
+              ],
+    %% TODO
+    %%
 
-terminate(_Reason, _State, Data) ->
-    io:format("~n~p~n",[timestamp(Data)]),
+    {ok, Pid} = wire:connect(), Wire = wire:open(Pid),
 
+    X0 = <<"rabbitbot">>, T = <<"topic">>,
+    K0 = <<"test">>,
+
+    Q0 = <<"test">>,
+
+    Method0 = #'exchange.declare'{ exchange = X0, type = T },
+    wire:call(Wire, Method0),
+
+    Method1 = #'queue.declare'{ queue = Q0, durable = true, arguments = [{<<"x-max-priority">>, byte, 10}] },
+    Res = wire:call(Wire, Method1), #'queue.declare_ok'{ queue = Q } = Res,
+
+    Method2 = #'queue.bind'{ queue = Q, exchange = X0, routing_key = K0 },
+    wire:call(Wire, Method2),
+
+    Method3 = #'basic.consume'{ queue = Q },
+    wire:call(Wire, Method3),
+
+    erlmachine:success(compute, Data#data{ wire = Wire }, Actions).
+
+terminate(_Reason, _State, _Data) ->
     ok.
 
 callback_mode() ->
@@ -141,13 +165,22 @@ callback_mode() ->
 
 %%  State machine
 
-execute(enter, _OldState, Data) ->
+compute(enter, _OldState, Data) ->
     {keep_state, Data, []};
 
-execute({timeout, Tag}, Code, Data) ->
-    {keep_state, _Data = Code(Data), [schedule(Tag, Data)]};
+compute({timeout, Tag}, Code, Data) ->
+    {keep_state, _Data = exec(Code, Data, Tag), [schedule(Tag, Data)]};
 
-execute(info, Message, Data) ->
+compute(info, {#'basic.deliver'{ delivery_tag = Tag }, Signal}, #data{ wire = Wire } = Data) ->
+
+    Method = #'basic.ack'{ delivery_tag = Tag },
+    wire:cast(Wire, Method),
+
+    io:format("~n~p~n", [Signal]),
+
+    {keep_state, Data, []};
+
+compute(info, Message, Data) ->
     io:format("~nInfo: ~p~n", [Message]),
 
     {keep_state, Data, []}.
@@ -157,10 +190,7 @@ execute(info, Message, Data) ->
 -spec data(SN::serial_no(), Timestamp::integer()) ->
           data().
 data(SN, Timestamp) ->
-    #data{ serial_no = SN, timestamp = Timestamp,
-           ram = #{}
-
-         }.
+    #data{ serial_no = SN, timestamp = Timestamp, ram = #{} }.
 
 -spec commands(Data::data()) -> [command()].
 commands(Data) ->
@@ -169,24 +199,6 @@ commands(Data) ->
 -spec commands(Data::data(), Commands::[command()]) -> data().
 commands(Data, Commands) ->
     Data#data{ commands = Commands }.
-
--spec var(Name::term(), Data::data()) -> term().
-var(Name, Data) ->
-    Ram = Data#data.ram,
-
-    Var = maps:get(Name, Ram),
-    Var.
-
--spec var(Name::term(), Value::term(), Data::data()) -> data().
-var(Name, Value, Data) ->
-    Ram = Data#data.ram,
-
-    Data2 = Data#data{ ram = Ram#{ Name => Value } },
-    Data2.
-
--spec timestamp(Data::data()) -> timestamp().
-timestamp(Data) ->
-    Data#data.timestamp.
 
 %% Env
 
@@ -209,11 +221,36 @@ action(Command) ->
 
     {{ 'timeout', _Tag = Name }, Timer, Code}.
 
+%% Compute API
+
+-spec var(Name::term(), Data::data()) -> term().
+var(Name, Data) ->
+    Ram = Data#data.ram,
+
+    Var = maps:get(Name, Ram),
+    Var.
+
+-spec var(Name::term(), Value::term(), Data::data()) -> data().
+var(Name, Value, Data) ->
+    Ram = Data#data.ram,
+
+    Data2 = Data#data{ ram = Ram#{ Name => Value } },
+    Data2.
+
+-spec exec(Code::function(), Data::data(), Tag::term()) -> data().
+exec(Code, Data, Tag) ->
+    Timestamp0 = timestamp(), Res = Code(Data),
+    Timestamp1 = timestamp(),
+
+    io:format("~n~p is executed in (~p ms)~n",[Tag, Timestamp1 - Timestamp0]),
+    Res.
+
+
 %% Commands
 
 -spec connect() -> function().
 connect() ->
-    fun (Data) -> {ok, Pid} = wire:connect(),  Wire = wire:open(Pid),
+    fun (Data) -> {ok, Pid} = wire:connect(), Wire = wire:open(Pid),
 
                   X = <<"rabbitbot">>,
                   T = <<"topic">>,
@@ -223,18 +260,17 @@ connect() ->
                   Method0 = #'exchange.declare'{ exchange = X, type = T },
                   wire:call(Wire, Method0),
 
-                  Headers = [ wire:header(<<"test">>, <<"">>)
-                            ],
+                  Headers = [wire:header(<<"test">>, <<"">>)],
+                  Payload = <<"test">>,
 
-                  Data = <<"test">>,
-
-                  Signal0 = wire:signal(Headers, Data),
+                  Signal0 = wire:signal(Headers, Payload),
                   Signal1 = wire:content_type(Signal0, <<"text/plain">>),
+                  Signal2 = wire:priority(Signal1, 10),
 
                   Method1 = #'basic.publish'{ 'exchange' = X, 'routing_key' = K },
-                  wire:cast(Wire, Method1, Signal1),
+                  wire:cast(Wire, Method1, Signal2),
 
-                  wire:disconnect(Pid),
+                  %% wire:disconnect(Pid),
 
                   Data2 = var(connection, Pid, Data),
                   Data2

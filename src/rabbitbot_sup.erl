@@ -5,8 +5,8 @@
 -export([init/1]).
 
 start_link() ->
-	supervisor:start_link({local, ?MODULE}, ?MODULE, []).
+    Res = supervisor:start_link({local, ?MODULE}, ?MODULE, []),
+    Res.
 
 init([]) ->
-	Procs = [],
-	{ok, {{one_for_one, 1, 5}, Procs}}.
+    {ok, {{one_for_one, 1, 5}, _Procs = []}}.
