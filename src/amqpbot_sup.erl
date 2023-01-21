@@ -1,4 +1,4 @@
--module(rabbitbot_sup).
+-module(amqpbot_sup).
 -behaviour(supervisor).
 
 -export([start_link/0]).

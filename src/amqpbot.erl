@@ -1,13 +1,10 @@
--module(rabbitbot).
+-module(amqpbot).
 -export([]).
 
 %% NOTE: https://en.wikipedia.org/wiki/Robot
 %% NOTE: https://www.rabbitmq.com/
 
--behaviour(erlmachine_scope).
 -behaviour(gen_statem).
-
--export([scope/0]).
 
 -export([boot/0]).
 
